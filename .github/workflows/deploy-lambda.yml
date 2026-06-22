@@ -1,0 +1,111 @@
+# Deploy CHAI agent Lambda code to AWS.
+# Requires secrets/vars from chai-infra Terraform (see docs/GITHUB_ACTIONS.md).
+
+name: Deploy Lambda
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agents/**"
+      - "shared/**"
+      - "requirements*.txt"
+      - "scripts/package-lambda.sh"
+      - ".github/workflows/deploy-lambda.yml"
+  workflow_dispatch:
+    inputs:
+      agent:
+        description: Agent Lambda to deploy
+        type: choice
+        options: [gmail-agent]
+        default: gmail-agent
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -q
+
+  deploy-gmail:
+    name: Deploy gmail-agent
+    needs: test
+    if: |
+      github.event_name == 'workflow_dispatch' && inputs.agent == 'gmail-agent' ||
+      github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: development
+    env:
+      LAMBDA_FUNCTION_NAME: ${{ vars.GMAIL_LAMBDA_FUNCTION_NAME || 'gmail-agent' }}
+      LAMBDA_HANDLER: agents.gmail.handler.handler
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Package Lambda artifact
+        run: |
+          chmod +x scripts/package-lambda.sh
+          scripts/package-lambda.sh gmail
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_LAMBDA_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-actions-chai-lambda-deploy-${{ github.run_id }}
+
+      - name: Deploy Lambda code
+        run: |
+          set -euo pipefail
+          ZIP_FILE="dist/lambda-gmail.zip"
+
+          aws lambda update-function-code \
+            --function-name "$LAMBDA_FUNCTION_NAME" \
+            --zip-file "fileb://${ZIP_FILE}"
+
+          aws lambda wait function-updated-v2 --function-name "$LAMBDA_FUNCTION_NAME"
+
+          CURRENT_HANDLER="$(aws lambda get-function-configuration \
+            --function-name "$LAMBDA_FUNCTION_NAME" \
+            --query Handler \
+            --output text)"
+
+          if [ "$CURRENT_HANDLER" != "$LAMBDA_HANDLER" ]; then
+            aws lambda update-function-configuration \
+              --function-name "$LAMBDA_FUNCTION_NAME" \
+              --handler "$LAMBDA_HANDLER"
+            aws lambda wait function-updated-v2 --function-name "$LAMBDA_FUNCTION_NAME"
+          fi
+
+      - name: Publish deployment summary
+        run: |
+          {
+            echo "### Lambda deploy"
+            echo ""
+            echo "| Setting | Value |"
+            echo "|---------|-------|"
+            echo "| Function | \`${LAMBDA_FUNCTION_NAME}\` |"
+            echo "| Handler | \`${LAMBDA_HANDLER}\` |"
+            echo "| Region | \`${AWS_REGION}\` |"
+            echo "| Commit | \`${GITHUB_SHA}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

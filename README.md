@@ -28,6 +28,10 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
+## CI/CD
+
+GitHub Actions runs tests on every PR and deploys `gmail-agent` to AWS Lambda on push to `main`. See [docs/GITHUB_ACTIONS.md](docs/GITHUB_ACTIONS.md).
+
 ## Layout
 
 ```
