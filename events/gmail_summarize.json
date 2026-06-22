@@ -1,0 +1,4 @@
+{
+  "action": "summarize",
+  "max_emails": 100
+}
